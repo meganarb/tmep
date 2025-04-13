@@ -27,7 +27,7 @@ void test_result(int result) {
     if (result) {
         printf("Passed!\n");
     } else {
-        printf("Failed!\n");
+        printf("Failed :(\n");
     }
 }
 
@@ -328,5 +328,5 @@ int main() {
     test_multi_IO();
     test_mode_change_during_IO();
     
-    return 0;
+    return EXIT_SUCCESS;
 }
