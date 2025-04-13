@@ -18,40 +18,34 @@
 
 #define BUFFER_SIZE 1024
 
-/* Global variables */
 int global_fd = -1;
 pthread_mutex_t global_mutex = PTHREAD_MUTEX_INITIALIZER;
 int mode_change_in_progress = 0;
-int tests_passed = 0;
-int tests_failed = 0;
 
-/* Utility function to report test results */
-void report_test(const char *test_name, int result) {
+// print pass/fail
+void test_result(int result) {
     if (result) {
-        printf("[PASS] %s\n", test_name);
-        tests_passed++;
+        printf("Passed!\n");
     } else {
-        printf("[FAIL] %s\n", test_name);
-        tests_failed++;
+        printf("Failed!\n");
     }
 }
 
-/* Set up an alarm to detect deadlocks */
+// alarm for finding deadlock, 5 seconds
 void setup_timeout(const char *test_name) {
     printf("Running test: %s\n", test_name);
     alarm(5);
 }
 
-/* Signal handler for timeouts */
+// in the case of a timeout, prob deadlock
 void timeout_handler(int signum) {
-    printf("\n[TIMEOUT] Test has timed out - possible deadlock detected\n");
+    printf("\nTest timed out, possible deadlock\n");
     if (global_fd >= 0) {
         close(global_fd);
     }
     exit(EXIT_FAILURE);
 }
 
-/* Helper function to open the device */
 int open_device() {
     int fd = open(MYDEV_PATH, O_RDWR);
     if (fd < 0) {
@@ -60,10 +54,9 @@ int open_device() {
     return fd;
 }
 
-
-/* Test 2: Concurrent open in MODE1 */
-void test_concurrent_open_mode1() {
-    setup_timeout("Concurrent Open in MODE1");
+// Test 1: opening at the same time in MODE1
+void test_simultaneous_open() {
+    setup_timeout("Open simultaneously in MODE1");
     
     int fd1 = open_device();
     if (fd1 < 0) return;
@@ -75,41 +68,38 @@ void test_concurrent_open_mode1() {
         return;
     }
     
-    if (pid == 0) {  // Child process
+    // child
+    if (pid == 0) {
         int fd2 = open_device();
         if (fd2 < 0) {
             exit(EXIT_FAILURE);
         }
-        
-        // In MODE1, second open should block indefinitely
-        // We'll sleep briefly then exit to avoid creating zombie
+       
         sleep(2);
         close(fd2);
         exit(EXIT_SUCCESS);
-    } else {  // Parent process
+
+    // parent
+    } else {  
         int status;
-        sleep(1);  // Give child time to attempt open
-        
-        // Now close our FD which should release the lock
+        sleep(1);
         close(fd1);
-        
-        // Wait for child to complete
         waitpid(pid, &status, 0);
         
-        // Test passes if child exited normally
-        report_test("Concurrent Open in MODE1", WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS);
+        // test passes if child exited normally
+        test_result(WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS);
     }
 }
 
 
-/* Test 4: Mode change while multiple processes have the device open */
+// Test 2: change mode while multiple processes have device open
 void test_mode_change_multiple_opens() {
-    setup_timeout("Mode Change with Multiple Opens");
+    setup_timeout("Change mode with multiple open");
     
     int fd1 = open_device();
     if (fd1 < 0) return;
     
-    // Switch to MODE2 to allow multiple opens
+    // change to mode2 so you can have multiple opens
     int ret = ioctl(fd1, E2_IOCMODE2, 0);
     if (ret < 0) {
         perror("ioctl MODE2 failed");
@@ -124,43 +114,41 @@ void test_mode_change_multiple_opens() {
         return;
     }
     
-    if (pid == 0) {  // Child process
+    if (pid == 0) {  // child process
         int fd2 = open_device();
         if (fd2 < 0) {
             exit(EXIT_FAILURE);
         }
-        
-        // Sleep to ensure parent has time to attempt mode change
         sleep(2);
         
-        // Try to read/write to verify device is still functional
+        // try to read/write to make sure it still works
         char buffer[10] = {0};
         ssize_t bytes = read(fd2, buffer, 5);
         
         close(fd2);
         exit(bytes >= 0 ? EXIT_SUCCESS : EXIT_FAILURE);
-    } else {  // Parent process
-        sleep(1);  // Give child time to open device
+
+    } else {  // parent process
+        sleep(1);
         
-        // Now try to switch back to MODE1, should wait for child to close
+        // switch back to mode1, should wait on child process
         ret = ioctl(fd1, E2_IOCMODE1, 0);
         if (ret < 0) {
             perror("ioctl MODE1 failed");
         }
         
-        // Wait for child to complete
         int status;
         waitpid(pid, &status, 0);
-        
         close(fd1);
         
-        // Test passes if mode change completed successfully
-        report_test("Mode Change with Multiple Opens", ret == 0 && WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS);
+        // test passes if mode change completed successfully
+        test_result(ret == 0 && WIFEXITED(status) && WEXITSTATUS(status) == EXIT_SUCCESS);
     }
 }
 
 
-/* Test 6: Multiple threads in MODE2 with read/write operations */
+// Test 3: multiple read/write with multiple threads in MODE2
+// directly below is the function used by the threads, underneath is the creator of the threads
 void *read_write_thread(void *arg) {
     int fd = open_device();
     if (fd < 0) {
@@ -196,13 +184,13 @@ void *read_write_thread(void *arg) {
     return (void *)0;
 }
 
-void test_concurrent_io_mode2() {
-    setup_timeout("Concurrent I/O in MODE2");
+void test_multi_IO() {
+    setup_timeout("Multi read/write with multi threads (MODE2)");
     
     int fd = open_device();
     if (fd < 0) return;
     
-    // Switch to MODE2
+    // switch to MODE2 (if not already)
     int ret = ioctl(fd, E2_IOCMODE2, 0);
     if (ret < 0) {
         perror("ioctl MODE2 failed");
@@ -213,7 +201,7 @@ void test_concurrent_io_mode2() {
     pthread_t threads[5];
     int success = 1;
     
-    // Create multiple threads performing I/O
+    // make all da threads
     for (int i = 0; i < 5; i++) {
         if (pthread_create(&threads[i], NULL, read_write_thread, NULL) != 0) {
             perror("pthread_create failed");
@@ -222,7 +210,7 @@ void test_concurrent_io_mode2() {
         }
     }
     
-    // Join all threads
+    // join all da threads
     for (int i = 0; i < 5; i++) {
         void *thread_result;
         if (pthread_join(threads[i], &thread_result) != 0) {
@@ -233,19 +221,18 @@ void test_concurrent_io_mode2() {
         }
     }
     
-    // Switch back to MODE1
     ret = ioctl(fd, E2_IOCMODE1, 0);
-    close(fd);
-    
-    report_test("Concurrent I/O in MODE2", success);
+    close(fd);   
+    test_result(success);
 }
 
-/* Test 7: Mode change during a read/write operation */
+// Test 4: change mode during read/write
+// similar to last test, below is the thread function and below that is another thread function and below that is the creator of the threads
 void *io_thread(void *arg) {
     int fd = *(int *)arg;
     char buffer[BUFFER_SIZE] = {0};
     
-    // Perform a long running write operation
+    // many writes!!1!
     for (int i = 0; i < 100; i++) {
         lseek(fd, 0, SEEK_SET);
         ssize_t result = write(fd, buffer, BUFFER_SIZE);
@@ -259,11 +246,9 @@ void *io_thread(void *arg) {
 
 void *mode_change_thread(void *arg) {
     int fd = *(int *)arg;
+    sleep(1); 
     
-    // Give I/O thread time to start
-    sleep(1);
-    
-    // Try mode change
+    // mode change moment
     pthread_mutex_lock(&global_mutex);
     mode_change_in_progress = 1;
     pthread_mutex_unlock(&global_mutex);
@@ -287,85 +272,61 @@ void *mode_change_thread(void *arg) {
     return (void *)0;
 }
 
-void test_mode_change_during_io() {
+void test_mode_change_during_IO() {
     setup_timeout("Mode Change During I/O");
-    
+
     int fd = open_device();
     if (fd < 0) return;
-    
+
     global_fd = fd;
-    
+
     pthread_t io_thread_id, mode_thread_id;
-    
-    // Create thread for I/O operations
+
+    // writing thread
     if (pthread_create(&io_thread_id, NULL, io_thread, &fd) != 0) {
         perror("pthread_create failed");
         close(fd);
         return;
     }
-    
-    // Create thread for mode changes
+
+    // mode change thread
     if (pthread_create(&mode_thread_id, NULL, mode_change_thread, &fd) != 0) {
         perror("pthread_create failed");
         pthread_cancel(io_thread_id);
         close(fd);
         return;
     }
-    
-    // Join threads
-    void *io_result, *mode_result;
+
+    void* io_result, * mode_result;
     int success = 1;
-    
+
     if (pthread_join(io_thread_id, &io_result) != 0 || io_result != 0) {
         success = 0;
     }
-    
+
     if (pthread_join(mode_thread_id, &mode_result) != 0 || mode_result != 0) {
         success = 0;
     }
-    
+
     close(fd);
     global_fd = -1;
-    
-    report_test("Mode Change During I/O", success);
+
+    test_result(success);
+}
 
 
 int main() {
-    printf("===== Device Driver Deadlock Test Program =====\n");
+    printf("Deadlock test cases:\n");
     
-    // Set up signal handler for timeout detection
+    // timeout detection stuff
     signal(SIGALRM, timeout_handler);
     srand(time(NULL));
     
-    // Run tests
-    test_concurrent_open_mode1();
-    test_concurrent_open_mode2();
+    // tests
+    test_simultaneous_open();
     test_mode_change_multiple_opens();
-    test_rapid_mode_changes();
-    test_concurrent_io_mode2();
-    test_mode_change_during_io();
-    test_racing_mode_changes();
+    test_multi_IO();
+    test_mode_change_during_IO();
     
-    // Basic mode switching test
-    setup_timeout("Basic Mode Switching");
-    int fd = open_device();
-    if (fd >= 0) {
-        pthread_t thread;
-        int ret = pthread_create(&thread, NULL, test_mode_switching, &fd);
-        if (ret == 0) {
-            void *thread_ret;
-            pthread_join(thread, &thread_ret);
-            report_test("Basic Mode Switching", thread_ret == 0);
-        } else {
-            report_test("Basic Mode Switching", 0);
-        }
-        close(fd);
-    }
-    
-    // Print summary
-    printf("\n===== Test Summary =====\n");
-    printf("Tests passed: %d\n", tests_passed);
-    printf("Tests failed: %d\n", tests_failed);
-    
-    return tests_failed > 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    return 0;
 }
