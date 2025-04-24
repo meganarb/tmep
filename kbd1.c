@@ -17,7 +17,6 @@
 #define NO_EVENT        '#'
 #define CAPSLOCK_PRESS  '@'
 #define CAPSLOCK_RELEASE '&'
-#define END_OF_INPUT    '$'  // Special marker for end of input
 
 #define LED_ON  1
 #define LED_OFF 0
@@ -359,8 +358,7 @@ void* control_listener(void* arg) {
 
     while (1) {
         char cmd;
-        ssize_t n = read(ctrl_cmd_fd, &cmd, 1);
-        if (n <= 0) break;
+        if(read(ctrl_cmd_fd, &cmd, 1) < 0) break;
 
         if (cmd == 'C') {
             int curr = *leds;
@@ -368,6 +366,7 @@ void* control_listener(void* arg) {
                 if (curr == LED_ON) printf("ON ");
                 else printf("OFF ");
                 fflush(stdout);
+
             }
             
             prev_state = curr;
@@ -375,7 +374,8 @@ void* control_listener(void* arg) {
             write(ctrl_ack_fd, "A", 1);
         }
     }
-    
+
+    printf("\n");
     close(ctrl_cmd_fd);
     close(ctrl_ack_fd);
     return NULL;
