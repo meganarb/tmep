@@ -11,12 +11,14 @@
 
 #define LED_BUF_SIZE 1
 
-#define NO_EVENT        '#'
-#define CAPSLOCK_PRESS  '@'
+#define NO_EVENT '#'
+#define CAPSLOCK_PRESS '@'
 #define CAPSLOCK_RELEASE '&'
 
-#define LED_ON  1
+#define LED_ON 1
 #define LED_OFF 0
+
+#define SHM_NAME "/led_shm"
 
 struct input_dev {
     void (*event)(struct input_dev* dev);
@@ -26,12 +28,11 @@ struct input_dev {
 struct usb_kbd {
     struct input_dev* dev;
 
-    int int_ep_fd;     // for reading from keyboard (interrupt endpoint)
-    int ctrl_cmd_fd;   // for writing LED control commands
-    int ctrl_ack_fd;   // for reading ACKs
+    int int_ep_fd; // interrupt endpoint
+    int ctrl_cmd_fd; // control endpoint
+    int ctrl_ack_fd; // ack
 
     unsigned char* leds;
-
     pthread_mutex_t leds_lock;
 };
 
@@ -40,23 +41,17 @@ typedef struct input_dev input_dev;
 
 void input_report_key(struct usb_kbd* kbd, unsigned int code, int value);
 
-// DRIVER
-
-#define SHM_NAME "/led_shm"
-
 usb_kbd kbd;
 int capslock_state = 0;
-char capslock_msg[1024] = "";
 
 void print_char(char ch) {
     if (capslock_state && ch >= 'a' && ch <= 'z')
         ch = ch - 'a' + 'A';
-    if (ch != '\n')
     printf("%c", ch);
     fflush(stdout);
 }
 
-// Simulated input_event callback
+// input event callback
 void usb_kbd_event(struct input_dev* dev_ptr) {
     if (dev_ptr->led == LED_ON && !capslock_state) {
         capslock_state = 1;
@@ -65,18 +60,17 @@ void usb_kbd_event(struct input_dev* dev_ptr) {
         capslock_state = 0;
     }
 
-    // Write new LED state to shared memory
+    // update led
     *(kbd.leds) = dev_ptr->led ? LED_ON : LED_OFF;
-    // Send control command
+    // control command
     write(kbd.ctrl_cmd_fd, "C", 1);
-
-    // Wait for ACK
+    // wait for ack
     char ack;
     read(kbd.ctrl_ack_fd, &ack, 1);
 
 }
 
-// Simulated irq handler
+// irq handler
 void* usb_kbd_irq(void* arg) {
     char ch = *(char*)arg;
     free(arg);
@@ -91,25 +85,19 @@ void* usb_kbd_irq(void* arg) {
     return NULL;
 }
 
-// Report a key event
+// key events
 void input_report_key(struct usb_kbd* kbd, unsigned int code, int value) {
     if (code == CAPSLOCK_PRESS || code == CAPSLOCK_RELEASE) {
         kbd->dev->led = value;
-        
         pthread_t tid;
-        pthread_create(&tid, NULL, (void* (*)(void*))kbd->dev->event, kbd->dev);
-        pthread_join(tid, NULL);
+        pthread_create(&tid, NULL, (void*)kbd->dev->event, kbd->dev);
+        pthread_detach(tid);
     }
 }
 
-int driver() {
-    // Set up pipes
+int driver() { // covers driver main, usb_kbd_open, usb_submit_urb
+
     int int_pipe[2], ctrl_cmd_pipe[2], ctrl_ack_pipe[2];
-
-    // Pipes must be pre-created using dup/exec between processes or use fixed names
-    // For now, we'll use known names for FIFO-like behavior
-
-    // Assume these pipes are already created by keyboard process:
     kbd.int_ep_fd = open("int_pipe", O_RDONLY);
     kbd.ctrl_cmd_fd = open("ctrl_cmd_pipe", O_WRONLY);
     kbd.ctrl_ack_fd = open("ctrl_ack_pipe", O_RDONLY);
@@ -119,7 +107,7 @@ int driver() {
         exit(1);
     }
 
-    // Set up shared memory for LED buffer
+    // shared mem for led :D
     int shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (shm_fd == -1) {
         perror("shm_open failed");
@@ -132,15 +120,13 @@ int driver() {
         exit(1);
     }
 
-    // Init usb_kbd fields
     pthread_mutex_init(&kbd.leds_lock, NULL);
     input_dev* dev = malloc(sizeof(input_dev));
     dev->event = usb_kbd_event;
     dev->led = LED_OFF;
     kbd.dev = dev;
 
-    // Call open (simulated)
-
+    // usb_kbd_open
     while (1) {
         char ch;
         ssize_t n = read(kbd.int_ep_fd, &ch, 1);
@@ -152,19 +138,12 @@ int driver() {
         *pch = ch;
         pthread_t irq_thread;
         pthread_create(&irq_thread, NULL, usb_kbd_irq, pch);
-        pthread_join(irq_thread, NULL);
-
-        // Simulate short delay between polls
-        usleep(10000); // 10ms
+        pthread_detach(irq_thread);
     }
-    printf("\n");
+    //printf("\n"); // if there is no newline at end of file, uncomment this :)
     
     return 0;
 }
-
-
-
-// KEYBOARD
 
 void* control_listener(void* arg) {
     unsigned char* leds = (unsigned char*)arg;
@@ -174,7 +153,7 @@ void* control_listener(void* arg) {
     int ctrl_ack_fd = open("ctrl_ack_pipe", O_WRONLY);
 
     if (ctrl_cmd_fd < 0 || ctrl_ack_fd < 0) {
-        perror("keyboard: control pipe open failed");
+        perror("failed to open pipe");
         exit(1);
     }
 
@@ -190,7 +169,7 @@ void* control_listener(void* arg) {
             }
             
             prev_state = curr;
-            // Just acknowledge either way
+            // send ack
             write(ctrl_ack_fd, "A", 1);
         }
     }
@@ -205,49 +184,47 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
 
-    // Create pipes (simulate endpoints)
-    // These should match the names expected by driver
+    // creating pipes for the endpoints
     mkfifo("int_pipe", 0666);
     mkfifo("ctrl_cmd_pipe", 0666);
     mkfifo("ctrl_ack_pipe", 0666);
     
-    // added by me :)
+    // start separate driver process
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) return driver();
 
     int int_pipe_fd = open("int_pipe", O_WRONLY);
     if (int_pipe_fd < 0) {
-        perror("keyboard: can't open int_pipe");
+        perror("can't open pipe int_pipe");
         exit(1);
     }
 
-    // Create shared memory for LED buffer
+    // shared mem led buf
     int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
     ftruncate(shm_fd, LED_BUF_SIZE);
     unsigned char* leds = mmap(0, LED_BUF_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (leds == MAP_FAILED) {
-        perror("keyboard: mmap failed");
+        perror("mmap failed");
         exit(1);
     }
 
-    *leds = LED_OFF; // Initially OFF
+    *leds = LED_OFF;
 
-    // Start LED control listener thread
     pthread_t ctrl_thread;
     pthread_create(&ctrl_thread, NULL, control_listener, leds);
 
-    // Read input file
+    // getting input from file
     FILE* file = fopen(argv[1], "r");
     if (!file) {
-        perror("keyboard: can't open input file");
+        perror("unable to open input file");
         exit(1);
     }
 
     char ch;
     while ((ch = fgetc(file)) != EOF) {
         write(int_pipe_fd, &ch, 1);
-        usleep(20000); // simulate polling delay (10ms)
+        usleep(20000); // delay, letters get jumbled otherwise :(
     }
 
     fclose(file);
